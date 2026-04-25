@@ -95,3 +95,7 @@ fi
 
 URL=$(gh release view "$TAG" --json url -q .url)
 echo "==> Done: $URL"
+
+# --- Clean local artifacts now that they're published --------------------------
+rm -rf CameraRecorder.app CameraRecorder-*.dmg
+echo "==> Cleaned local .app and .dmg"
