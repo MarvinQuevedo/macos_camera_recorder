@@ -1,13 +1,54 @@
 import AVFoundation
 import AppKit
 import Combine
+import CoreMedia
 import UniformTypeIdentifiers
 
 @MainActor
 final class CameraManager: NSObject, ObservableObject {
     @Published var devices: [AVCaptureDevice] = []
-    @Published var selectedDeviceID: String?
-    @Published var includeAudio: Bool = true
+    @Published var selectedDeviceID: String? {
+        didSet {
+            if let id = selectedDeviceID {
+                UserDefaults.standard.set(id, forKey: SettingsKey.lastDeviceID)
+            }
+        }
+    }
+    @Published var favoriteDeviceID: String? {
+        didSet {
+            let d = UserDefaults.standard
+            if let id = favoriteDeviceID { d.set(id, forKey: SettingsKey.favoriteDeviceID) }
+            else { d.removeObject(forKey: SettingsKey.favoriteDeviceID) }
+        }
+    }
+    @Published var includeAudio: Bool {
+        didSet { UserDefaults.standard.set(includeAudio, forKey: SettingsKey.includeAudio) }
+    }
+    @Published var resolution: ResolutionPreset {
+        didSet {
+            UserDefaults.standard.set(resolution.rawValue, forKey: SettingsKey.resolution)
+            if isRunning { applyResolutionAndFrameRate() }
+        }
+    }
+    @Published var frameRate: FrameRatePreset {
+        didSet {
+            UserDefaults.standard.set(frameRate.rawValue, forKey: SettingsKey.frameRate)
+            if isRunning { applyResolutionAndFrameRate() }
+        }
+    }
+    @Published var mirror: Bool {
+        didSet {
+            UserDefaults.standard.set(mirror, forKey: SettingsKey.mirror)
+            applyMirror()
+        }
+    }
+    @Published var autoStart: Bool {
+        didSet { UserDefaults.standard.set(autoStart, forKey: SettingsKey.autoStart) }
+    }
+    @Published var photoFormat: PhotoFormat {
+        didSet { UserDefaults.standard.set(photoFormat.rawValue, forKey: SettingsKey.photoFormat) }
+    }
+
     @Published var isRunning: Bool = false
     @Published var isRecording: Bool = false
     @Published var recordingElapsed: TimeInterval = 0
@@ -25,12 +66,30 @@ final class CameraManager: NSObject, ObservableObject {
     private var recStart: Date?
 
     override init() {
+        let d = UserDefaults.standard
+        d.register(defaults: [
+            SettingsKey.includeAudio: true,
+            SettingsKey.resolution: ResolutionPreset.auto.rawValue,
+            SettingsKey.frameRate: FrameRatePreset.auto.rawValue,
+            SettingsKey.mirror: false,
+            SettingsKey.autoStart: false,
+            SettingsKey.photoFormat: PhotoFormat.jpeg.rawValue
+        ])
+        self.includeAudio = d.bool(forKey: SettingsKey.includeAudio)
+        self.resolution = ResolutionPreset(rawValue: d.string(forKey: SettingsKey.resolution) ?? "") ?? .auto
+        self.frameRate = FrameRatePreset(rawValue: d.integer(forKey: SettingsKey.frameRate)) ?? .auto
+        self.mirror = d.bool(forKey: SettingsKey.mirror)
+        self.autoStart = d.bool(forKey: SettingsKey.autoStart)
+        self.photoFormat = PhotoFormat(rawValue: d.string(forKey: SettingsKey.photoFormat) ?? "") ?? .jpeg
+        self.favoriteDeviceID = d.string(forKey: SettingsKey.favoriteDeviceID)
         super.init()
-        session.sessionPreset = .high
+
         if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
         if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
         refreshDevices()
     }
+
+    // MARK: - Devices
 
     func refreshDevices() {
         var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
@@ -45,10 +104,37 @@ final class CameraManager: NSObject, ObservableObject {
             position: .unspecified
         )
         devices = discovery.devices
+
+        let preferredID = preferredInitialDeviceID()
         if selectedDeviceID == nil || !devices.contains(where: { $0.uniqueID == selectedDeviceID }) {
-            selectedDeviceID = devices.first?.uniqueID
+            selectedDeviceID = preferredID
         }
     }
+
+    /// Resuelve qué cámara mostrar al abrir: favorita > última usada > primera disponible.
+    private func preferredInitialDeviceID() -> String? {
+        if let fav = favoriteDeviceID, devices.contains(where: { $0.uniqueID == fav }) {
+            return fav
+        }
+        let last = UserDefaults.standard.string(forKey: SettingsKey.lastDeviceID)
+        if let last, devices.contains(where: { $0.uniqueID == last }) {
+            return last
+        }
+        return devices.first?.uniqueID
+    }
+
+    func toggleFavoriteForCurrentSelection() {
+        guard let id = selectedDeviceID else { return }
+        if favoriteDeviceID == id {
+            favoriteDeviceID = nil
+            lastInfo = "Favorita eliminada"
+        } else {
+            favoriteDeviceID = id
+            lastInfo = "Marcada como favorita"
+        }
+    }
+
+    // MARK: - Session
 
     func start() async {
         guard await AVCaptureDevice.requestAccess(for: .video) else {
@@ -69,6 +155,8 @@ final class CameraManager: NSObject, ObservableObject {
             if !s.isRunning { s.startRunning() }
         }.value
         isRunning = session.isRunning
+        applyResolutionAndFrameRate()
+        applyMirror()
     }
 
     func stop() {
@@ -85,11 +173,15 @@ final class CameraManager: NSObject, ObservableObject {
               let id = selectedDeviceID,
               let device = devices.first(where: { $0.uniqueID == id }) else { return }
         configure(videoDevice: device)
+        applyResolutionAndFrameRate()
+        applyMirror()
     }
 
     private func configure(videoDevice: AVCaptureDevice) {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
+
+        session.sessionPreset = resolution.sessionPreset
 
         if let videoInput { session.removeInput(videoInput) }
         if let audioInput { session.removeInput(audioInput); self.audioInput = nil }
@@ -114,11 +206,49 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    private func applyResolutionAndFrameRate() {
+        if session.sessionPreset != resolution.sessionPreset,
+           session.canSetSessionPreset(resolution.sessionPreset) {
+            session.beginConfiguration()
+            session.sessionPreset = resolution.sessionPreset
+            session.commitConfiguration()
+        }
+
+        guard frameRate != .auto, let device = videoInput?.device else { return }
+        let target = Double(frameRate.rawValue)
+        let supports = device.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= target && $0.maxFrameRate >= target
+        }
+        guard supports else { return }
+        do {
+            try device.lockForConfiguration()
+            let dur = CMTime(value: 1, timescale: Int32(frameRate.rawValue))
+            device.activeVideoMinFrameDuration = dur
+            device.activeVideoMaxFrameDuration = dur
+            device.unlockForConfiguration()
+        } catch {
+            // El frame rate es un nice-to-have; si falla, el preset por defecto se mantiene.
+        }
+    }
+
+    /// Aplica el espejado a preview, foto y video. Llamar en main thread.
+    func applyMirror() {
+        let connections: [AVCaptureConnection] = [
+            photoOutput.connection(with: .video),
+            movieOutput.connection(with: .video)
+        ].compactMap { $0 }
+        for conn in connections where conn.isVideoMirroringSupported {
+            conn.automaticallyAdjustsVideoMirroring = false
+            conn.isVideoMirrored = mirror
+        }
+    }
+
     // MARK: - Photo
 
     func capturePhoto(toClipboard: Bool) {
+        guard isRunning else { return }
         let settings: AVCapturePhotoSettings
-        if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
+        if photoFormat == .jpeg, photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
             settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         } else {
             settings = AVCapturePhotoSettings()
@@ -151,8 +281,10 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func savePhoto(_ image: NSImage) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png, .jpeg]
-        panel.nameFieldStringValue = "captura-\(timestamp()).png"
+        let preferJPEG = photoFormat == .jpeg
+        panel.allowedContentTypes = preferJPEG ? [.jpeg, .png] : [.png, .jpeg]
+        let ext = preferJPEG ? "jpg" : "png"
+        panel.nameFieldStringValue = "captura-\(timestamp()).\(ext)"
         panel.canCreateDirectories = true
         panel.begin { [weak self] result in
             guard result == .OK, let url = panel.url else { return }
@@ -161,8 +293,8 @@ final class CameraManager: NSObject, ObservableObject {
                 self?.lastError = "No se pudo codificar la imagen"
                 return
             }
-            let ext = url.pathExtension.lowercased()
-            let isJPEG = ext == "jpg" || ext == "jpeg"
+            let urlExt = url.pathExtension.lowercased()
+            let isJPEG = urlExt == "jpg" || urlExt == "jpeg"
             let type: NSBitmapImageRep.FileType = isJPEG ? .jpeg : .png
             let props: [NSBitmapImageRep.PropertyKey: Any] = isJPEG
                 ? [.compressionFactor: 0.92]
@@ -173,9 +305,9 @@ final class CameraManager: NSObject, ObservableObject {
                     return
                 }
                 try data.write(to: url, options: .atomic)
-                self?.lastInfo = "Imagen guardada"
+                Task { @MainActor in self?.lastInfo = "Imagen guardada" }
             } catch {
-                self?.lastError = error.localizedDescription
+                Task { @MainActor in self?.lastError = error.localizedDescription }
             }
         }
     }
@@ -183,7 +315,7 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Video
 
     func startRecording() {
-        guard !movieOutput.isRecording else { return }
+        guard isRunning, !movieOutput.isRecording else { return }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rec-\(timestamp()).mov")
         try? FileManager.default.removeItem(at: url)
@@ -225,9 +357,9 @@ final class CameraManager: NSObject, ObservableObject {
                     try FileManager.default.removeItem(at: dest)
                 }
                 try FileManager.default.copyItem(at: src, to: dest)
-                self?.lastInfo = "Video guardado"
+                Task { @MainActor in self?.lastInfo = "Video guardado" }
             } catch {
-                self?.lastError = error.localizedDescription
+                Task { @MainActor in self?.lastError = error.localizedDescription }
             }
         }
     }

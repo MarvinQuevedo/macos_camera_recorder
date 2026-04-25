@@ -5,12 +5,21 @@ struct ContentView: View {
     @StateObject private var cam = CameraManager()
     @State private var showError = false
     @State private var infoOpacity: Double = 0
+    @State private var didAutoStart = false
 
     var body: some View {
         VStack(spacing: 0) {
             preview
             Divider()
             controls.padding(12)
+        }
+        .task {
+            // Auto-iniciar al abrir si está habilitado y hay cámara disponible.
+            guard !didAutoStart else { return }
+            didAutoStart = true
+            if cam.autoStart, !cam.devices.isEmpty {
+                await cam.start()
+            }
         }
         .onChange(of: cam.lastError) { newValue in showError = newValue != nil }
         .onChange(of: cam.lastInfo) { newValue in
@@ -32,7 +41,7 @@ struct ContentView: View {
 
     private var preview: some View {
         ZStack(alignment: .topTrailing) {
-            PreviewView(session: cam.session)
+            PreviewView(session: cam.session, mirror: cam.mirror)
                 .background(Color.black)
                 .frame(minHeight: 380)
 
@@ -73,7 +82,7 @@ struct ContentView: View {
                         Text("Sin cámaras detectadas").tag("")
                     }
                     ForEach(cam.devices, id: \.uniqueID) { d in
-                        Text(d.localizedName).tag(d.uniqueID)
+                        Text(deviceLabel(d)).tag(d.uniqueID)
                     }
                 }
                 .frame(maxWidth: 360)
@@ -82,15 +91,20 @@ struct ContentView: View {
                 }
 
                 Button {
+                    cam.toggleFavoriteForCurrentSelection()
+                } label: {
+                    Image(systemName: isCurrentFavorite ? "star.fill" : "star")
+                        .foregroundStyle(isCurrentFavorite ? .yellow : .secondary)
+                }
+                .help(isCurrentFavorite ? "Quitar de favoritas" : "Marcar como favorita")
+                .disabled(cam.selectedDeviceID == nil)
+
+                Button {
                     cam.refreshDevices()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("Recargar dispositivos")
-
-                Toggle("Audio", isOn: $cam.includeAudio)
-                    .toggleStyle(.checkbox)
-                    .disabled(cam.isRunning)
 
                 Spacer()
 
@@ -101,6 +115,36 @@ struct ContentView: View {
                         .keyboardShortcut(.return)
                         .disabled(cam.devices.isEmpty)
                 }
+            }
+
+            HStack(spacing: 12) {
+                Picker("Resolución", selection: $cam.resolution) {
+                    ForEach(ResolutionPreset.allCases) { Text($0.label).tag($0) }
+                }
+                .frame(maxWidth: 240)
+
+                Picker("FPS", selection: $cam.frameRate) {
+                    ForEach(FrameRatePreset.allCases) { Text($0.label).tag($0) }
+                }
+                .frame(maxWidth: 160)
+
+                Picker("Foto", selection: $cam.photoFormat) {
+                    ForEach(PhotoFormat.allCases) { Text($0.label).tag($0) }
+                }
+                .frame(maxWidth: 140)
+
+                Toggle("Espejo", isOn: $cam.mirror)
+                    .toggleStyle(.checkbox)
+
+                Toggle("Audio", isOn: $cam.includeAudio)
+                    .toggleStyle(.checkbox)
+                    .disabled(cam.isRunning)
+
+                Toggle("Auto-iniciar", isOn: $cam.autoStart)
+                    .toggleStyle(.checkbox)
+                    .help("Encender la cámara favorita al abrir la app")
+
+                Spacer()
             }
 
             HStack(spacing: 8) {
@@ -154,6 +198,18 @@ struct ContentView: View {
                 .disabled(cam.lastVideoURL == nil)
             }
         }
+    }
+
+    private var isCurrentFavorite: Bool {
+        guard let id = cam.selectedDeviceID, let fav = cam.favoriteDeviceID else { return false }
+        return id == fav
+    }
+
+    private func deviceLabel(_ d: AVCaptureDevice) -> String {
+        if d.uniqueID == cam.favoriteDeviceID {
+            return "★ \(d.localizedName)"
+        }
+        return d.localizedName
     }
 
     private func formatTime(_ t: TimeInterval) -> String {

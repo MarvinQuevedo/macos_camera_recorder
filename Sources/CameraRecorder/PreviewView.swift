@@ -4,15 +4,18 @@ import AppKit
 
 struct PreviewView: NSViewRepresentable {
     let session: AVCaptureSession
+    let mirror: Bool
 
     func makeNSView(context: Context) -> PreviewNSView {
         let view = PreviewNSView()
         view.attach(session: session)
+        view.setMirrored(mirror)
         return view
     }
 
     func updateNSView(_ nsView: PreviewNSView, context: Context) {
         nsView.attach(session: session)
+        nsView.setMirrored(mirror)
     }
 }
 
@@ -37,6 +40,12 @@ final class PreviewNSView: NSView {
         if previewLayer.session !== session {
             previewLayer.session = session
         }
+    }
+
+    func setMirrored(_ mirrored: Bool) {
+        guard let conn = previewLayer.connection, conn.isVideoMirroringSupported else { return }
+        conn.automaticallyAdjustsVideoMirroring = false
+        conn.isVideoMirrored = mirrored
     }
 
     override func layout() {
