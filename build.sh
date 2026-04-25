@@ -98,7 +98,9 @@ notarize_bundle() {
     echo "==> Stapling $target"
     xcrun stapler staple "$target"
 
-    [[ -n "$cleanup" ]] && rm -f "$cleanup"
+    if [[ -n "$cleanup" ]]; then
+        rm -f "$cleanup"
+    fi
 }
 
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
