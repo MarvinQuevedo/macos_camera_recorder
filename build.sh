@@ -38,13 +38,17 @@ if [[ -z "${SIGN_IDENTITY:-}" ]]; then
     fi
 fi
 
+ENTITLEMENTS="CameraRecorder.entitlements"
+
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
     SIGN_KIND="ad-hoc"
     APP_CODESIGN_FLAGS=(--force --deep --sign -)
     DMG_CODESIGN_FLAGS=(--force --sign -)
 else
     SIGN_KIND="developer-id"
-    APP_CODESIGN_FLAGS=(--force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY")
+    # Hardened Runtime blocks camera/mic access unless the matching
+    # entitlements are baked into the signature, so they must be passed here.
+    APP_CODESIGN_FLAGS=(--force --deep --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY")
     DMG_CODESIGN_FLAGS=(--force --timestamp --sign "$SIGN_IDENTITY")
 fi
 
@@ -113,14 +117,49 @@ fi
 # --- Build DMG -----------------------------------------------------------------
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
 DMG="CameraRecorder-${VERSION}.dmg"
+rm -f "$DMG"
 
 echo "==> Building $DMG"
-STAGING=$(mktemp -d)
-cp -R "$APP_DIR" "$STAGING/"
-ln -s /Applications "$STAGING/Applications"
-rm -f "$DMG"
-hdiutil create -volname "Camera Recorder" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
-rm -rf "$STAGING"
+if command -v create-dmg >/dev/null 2>&1; then
+    BG_ARG=()
+    [[ -f "Resources/dmg-background.png" ]] && BG_ARG=(--background "Resources/dmg-background.png")
+
+    # create-dmg occasionally fails the first time with an AppleScript timeout;
+    # retry once before giving up.
+    create-dmg \
+        --volname "Camera Recorder" \
+        --volicon "Resources/AppIcon.icns" \
+        --window-pos 200 120 \
+        --window-size 600 400 \
+        --icon-size 128 \
+        --icon "CameraRecorder.app" 160 200 \
+        --app-drop-link 440 200 \
+        --hide-extension "CameraRecorder.app" \
+        --no-internet-enable \
+        ${BG_ARG[@]+"${BG_ARG[@]}"} \
+        "$DMG" \
+        "$APP_DIR" \
+    || create-dmg \
+        --volname "Camera Recorder" \
+        --volicon "Resources/AppIcon.icns" \
+        --window-pos 200 120 \
+        --window-size 600 400 \
+        --icon-size 128 \
+        --icon "CameraRecorder.app" 160 200 \
+        --app-drop-link 440 200 \
+        --hide-extension "CameraRecorder.app" \
+        --no-internet-enable \
+        ${BG_ARG[@]+"${BG_ARG[@]}"} \
+        "$DMG" \
+        "$APP_DIR"
+else
+    echo "    (create-dmg not installed; falling back to hdiutil. brew install create-dmg for a nicer DMG)"
+    STAGING=$(mktemp -d)
+    cp -R "$APP_DIR" "$STAGING/"
+    ln -s /Applications "$STAGING/Applications"
+    hdiutil create -volname "Camera Recorder" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
+    rm -rf "$STAGING"
+fi
 
 codesign "${DMG_CODESIGN_FLAGS[@]}" "$DMG" >/dev/null
 
