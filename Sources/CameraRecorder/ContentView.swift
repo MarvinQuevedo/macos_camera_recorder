@@ -127,7 +127,6 @@ struct ContentView: View {
 
     private var cleanModeBubble: some View {
         VStack {
-            Spacer()
             HStack {
                 Spacer()
                 Button {
@@ -144,9 +143,10 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .help("Mostrar controles (⌘⇧H)")
                 .keyboardShortcut("h", modifiers: [.command, .shift])
-                .padding(14)
             }
+            Spacer()
         }
+        .padding(20)
     }
 
     private var bottomCluster: some View {
