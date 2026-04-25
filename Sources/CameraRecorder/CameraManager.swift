@@ -22,7 +22,10 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
     @Published var includeAudio: Bool {
-        didSet { UserDefaults.standard.set(includeAudio, forKey: SettingsKey.includeAudio) }
+        didSet {
+            UserDefaults.standard.set(includeAudio, forKey: SettingsKey.includeAudio)
+            if isRunning { Task { await applyAudioInput() } }
+        }
     }
     @Published var resolution: ResolutionPreset {
         didSet {
@@ -42,17 +45,18 @@ final class CameraManager: NSObject, ObservableObject {
             applyMirror()
         }
     }
-    @Published var autoStart: Bool {
-        didSet { UserDefaults.standard.set(autoStart, forKey: SettingsKey.autoStart) }
-    }
     @Published var photoFormat: PhotoFormat {
         didSet { UserDefaults.standard.set(photoFormat.rawValue, forKey: SettingsKey.photoFormat) }
+    }
+    @Published var videoFormat: VideoFormat {
+        didSet { UserDefaults.standard.set(videoFormat.rawValue, forKey: SettingsKey.videoFormat) }
     }
 
     @Published var isRunning: Bool = false
     @Published var isRecording: Bool = false
+    @Published var isExporting: Bool = false
     @Published var recordingElapsed: TimeInterval = 0
-    @Published var lastVideoURL: URL?
+    @Published var pendingRecording: PendingRecording?
     @Published var lastError: String?
     @Published var lastInfo: String?
 
@@ -64,6 +68,8 @@ final class CameraManager: NSObject, ObservableObject {
     private var photoDelegate: PhotoCaptureDelegate?
     private var recTimer: Timer?
     private var recStart: Date?
+    private var connectObserver: NSObjectProtocol?
+    private var disconnectObserver: NSObjectProtocol?
 
     override init() {
         let d = UserDefaults.standard
@@ -72,21 +78,27 @@ final class CameraManager: NSObject, ObservableObject {
             SettingsKey.resolution: ResolutionPreset.auto.rawValue,
             SettingsKey.frameRate: FrameRatePreset.auto.rawValue,
             SettingsKey.mirror: false,
-            SettingsKey.autoStart: false,
-            SettingsKey.photoFormat: PhotoFormat.jpeg.rawValue
+            SettingsKey.photoFormat: PhotoFormat.jpeg.rawValue,
+            SettingsKey.videoFormat: VideoFormat.mp4.rawValue
         ])
         self.includeAudio = d.bool(forKey: SettingsKey.includeAudio)
         self.resolution = ResolutionPreset(rawValue: d.string(forKey: SettingsKey.resolution) ?? "") ?? .auto
         self.frameRate = FrameRatePreset(rawValue: d.integer(forKey: SettingsKey.frameRate)) ?? .auto
         self.mirror = d.bool(forKey: SettingsKey.mirror)
-        self.autoStart = d.bool(forKey: SettingsKey.autoStart)
         self.photoFormat = PhotoFormat(rawValue: d.string(forKey: SettingsKey.photoFormat) ?? "") ?? .jpeg
+        self.videoFormat = VideoFormat(rawValue: d.string(forKey: SettingsKey.videoFormat) ?? "") ?? .mp4
         self.favoriteDeviceID = d.string(forKey: SettingsKey.favoriteDeviceID)
         super.init()
 
         if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
         if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
         refreshDevices()
+        installDeviceObservers()
+    }
+
+    deinit {
+        if let o = connectObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = disconnectObserver { NotificationCenter.default.removeObserver(o) }
     }
 
     // MARK: - Devices
@@ -111,7 +123,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    /// Resuelve qué cámara mostrar al abrir: favorita > última usada > primera disponible.
     private func preferredInitialDeviceID() -> String? {
         if let fav = favoriteDeviceID, devices.contains(where: { $0.uniqueID == fav }) {
             return fav
@@ -131,6 +142,30 @@ final class CameraManager: NSObject, ObservableObject {
         } else {
             favoriteDeviceID = id
             lastInfo = "Marcada como favorita"
+        }
+    }
+
+    private func installDeviceObservers() {
+        let center = NotificationCenter.default
+        connectObserver = center.addObserver(
+            forName: .AVCaptureDeviceWasConnected,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshDevices()
+                if !self.isRunning, !self.devices.isEmpty {
+                    await self.start()
+                }
+            }
+        }
+        disconnectObserver = center.addObserver(
+            forName: .AVCaptureDeviceWasDisconnected,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshDevices() }
         }
     }
 
@@ -231,7 +266,28 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    /// Aplica el espejado a preview, foto y video. Llamar en main thread.
+    private func applyAudioInput() async {
+        if movieOutput.isRecording {
+            lastError = "Detén la grabación antes de cambiar el audio"
+            return
+        }
+        if includeAudio {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
+        }
+        session.beginConfiguration()
+        if let audioInput {
+            session.removeInput(audioInput)
+            self.audioInput = nil
+        }
+        if includeAudio, let audioDevice = AVCaptureDevice.default(for: .audio),
+           let aInput = try? AVCaptureDeviceInput(device: audioDevice),
+           session.canAddInput(aInput) {
+            session.addInput(aInput)
+            audioInput = aInput
+        }
+        session.commitConfiguration()
+    }
+
     func applyMirror() {
         let connections: [AVCaptureConnection] = [
             photoOutput.connection(with: .video),
@@ -314,17 +370,15 @@ final class CameraManager: NSObject, ObservableObject {
 
     // MARK: - Video
 
+    func toggleRecording() {
+        if isRecording { stopRecording() } else { startRecording() }
+    }
+
     func startRecording() {
         guard isRunning, !movieOutput.isRecording else { return }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rec-\(timestamp()).mov")
         try? FileManager.default.removeItem(at: url)
-
-        if let connection = movieOutput.connection(with: .video) {
-            if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .auto
-            }
-        }
 
         movieOutput.startRecording(to: url, recordingDelegate: self)
         recStart = Date()
@@ -344,32 +398,107 @@ final class CameraManager: NSObject, ObservableObject {
         recTimer = nil
     }
 
-    func saveLastVideoAs() {
-        guard let src = lastVideoURL else { return }
+    // MARK: - Pending recording actions
+
+    func savePendingRecording() {
+        guard let pending = pendingRecording else { return }
+        let format = videoFormat
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType.quickTimeMovie]
-        panel.nameFieldStringValue = src.lastPathComponent
+        panel.allowedContentTypes = [format.utType]
+        panel.nameFieldStringValue = "rec-\(timestamp()).\(format.fileExtension)"
         panel.canCreateDirectories = true
         panel.begin { [weak self] result in
+            guard let self else { return }
             guard result == .OK, let dest = panel.url else { return }
-            do {
-                if FileManager.default.fileExists(atPath: dest.path) {
-                    try FileManager.default.removeItem(at: dest)
+            Task { @MainActor in
+                self.isExporting = true
+                defer { self.isExporting = false }
+                do {
+                    try await self.export(from: pending.url, to: dest, format: format)
+                    self.lastInfo = "Video guardado"
+                } catch {
+                    self.lastError = error.localizedDescription
                 }
-                try FileManager.default.copyItem(at: src, to: dest)
-                Task { @MainActor in self?.lastInfo = "Video guardado" }
-            } catch {
-                Task { @MainActor in self?.lastError = error.localizedDescription }
+                try? FileManager.default.removeItem(at: pending.url)
+                self.pendingRecording = nil
             }
         }
     }
 
-    func copyLastVideoToClipboard() {
-        guard let url = lastVideoURL else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.writeObjects([url as NSURL])
-        lastInfo = "Video copiado al portapapeles"
+    func copyPendingRecordingToClipboard() {
+        guard let pending = pendingRecording else { return }
+        let format = videoFormat
+        Task { @MainActor in
+            isExporting = true
+            defer { isExporting = false }
+            let dest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rec-\(timestamp()).\(format.fileExtension)")
+            try? FileManager.default.removeItem(at: dest)
+            do {
+                try await export(from: pending.url, to: dest, format: format)
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.writeObjects([dest as NSURL])
+                lastInfo = "Video copiado al portapapeles"
+            } catch {
+                lastError = error.localizedDescription
+            }
+            try? FileManager.default.removeItem(at: pending.url)
+            pendingRecording = nil
+        }
+    }
+
+    func discardPendingRecording() {
+        guard let pending = pendingRecording else { return }
+        try? FileManager.default.removeItem(at: pending.url)
+        pendingRecording = nil
+        lastInfo = "Grabación descartada"
+    }
+
+    private func export(from src: URL, to dest: URL, format: VideoFormat) async throws {
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try FileManager.default.removeItem(at: dest)
+        }
+        let srcExt = src.pathExtension.lowercased()
+        if format == .mov && srcExt == "mov" {
+            try FileManager.default.copyItem(at: src, to: dest)
+            return
+        }
+        try await transcode(from: src, to: dest, fileType: format.avFileType)
+    }
+
+    private func transcode(from src: URL, to dest: URL, fileType: AVFileType) async throws {
+        let asset = AVURLAsset(url: src)
+        guard let exporter = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            throw NSError(
+                domain: "CameraRecorder",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "No se pudo iniciar la exportación"]
+            )
+        }
+        exporter.outputURL = dest
+        exporter.outputFileType = fileType
+        exporter.shouldOptimizeForNetworkUse = true
+        let box = SendableBox(exporter)
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            box.value.exportAsynchronously {
+                switch box.value.status {
+                case .completed:
+                    cont.resume(returning: ())
+                case .cancelled:
+                    cont.resume(throwing: CancellationError())
+                default:
+                    cont.resume(throwing: box.value.error ?? NSError(
+                        domain: "CameraRecorder",
+                        code: -2,
+                        userInfo: [NSLocalizedDescriptionKey: "Exportación fallida"]
+                    ))
+                }
+            }
+        }
     }
 
     private func timestamp() -> String {
@@ -402,17 +531,26 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 let nsError = error as NSError
                 let success = (nsError.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) ?? false
                 if success {
-                    self.lastVideoURL = outputFileURL
-                    self.lastInfo = "Grabación finalizada"
+                    self.pendingRecording = PendingRecording(url: outputFileURL)
                 } else {
                     self.lastError = error.localizedDescription
+                    try? FileManager.default.removeItem(at: outputFileURL)
                 }
             } else {
-                self.lastVideoURL = outputFileURL
-                self.lastInfo = "Grabación finalizada"
+                self.pendingRecording = PendingRecording(url: outputFileURL)
             }
         }
     }
+}
+
+struct PendingRecording: Identifiable, Hashable {
+    let id = UUID()
+    let url: URL
+}
+
+private final class SendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
 }
 
 private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {

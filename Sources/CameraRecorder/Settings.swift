@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import UniformTypeIdentifiers
 
 enum SettingsKey {
     static let favoriteDeviceID = "favoriteDeviceID"
@@ -8,8 +9,8 @@ enum SettingsKey {
     static let resolution = "resolution"
     static let frameRate = "frameRate"
     static let mirror = "mirror"
-    static let autoStart = "autoStart"
     static let photoFormat = "photoFormat"
+    static let videoFormat = "videoFormat"
 }
 
 enum ResolutionPreset: String, CaseIterable, Identifiable {
@@ -51,6 +52,30 @@ enum PhotoFormat: String, CaseIterable, Identifiable {
         switch self {
         case .jpeg: return "JPEG"
         case .png:  return "PNG"
+        }
+    }
+}
+
+enum VideoFormat: String, CaseIterable, Identifiable {
+    case mp4, mov
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .mp4: return "MP4 (H.264)"
+        case .mov: return "QuickTime (MOV)"
+        }
+    }
+    var fileExtension: String { rawValue }
+    var avFileType: AVFileType {
+        switch self {
+        case .mp4: return .mp4
+        case .mov: return .mov
+        }
+    }
+    var utType: UTType {
+        switch self {
+        case .mp4: return .mpeg4Movie
+        case .mov: return .quickTimeMovie
         }
     }
 }
