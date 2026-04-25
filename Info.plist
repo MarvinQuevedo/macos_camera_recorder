@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>CameraRecorder</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.example.CameraRecorder</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Camera Recorder</string>
+    <key>CFBundleDisplayName</key>
+    <string>Camera Recorder</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>Camera Recorder necesita acceso a la cámara para mostrar la imagen y capturar fotos y videos.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Camera Recorder usa el micrófono para grabar audio en los videos.</string>
+</dict>
+</plist>
