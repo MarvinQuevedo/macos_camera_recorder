@@ -216,21 +216,28 @@ final class CameraManager: NSObject, ObservableObject {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
 
-        session.sessionPreset = resolution.sessionPreset
-
         if let videoInput { session.removeInput(videoInput) }
         if let audioInput { session.removeInput(audioInput); self.audioInput = nil }
+
+        // Reset to a safe baseline so canAddInput doesn't fail because of a
+        // preset left over from a previous device that the new one can't match.
+        session.sessionPreset = .high
 
         do {
             let input = try AVCaptureDeviceInput(device: videoDevice)
             if session.canAddInput(input) {
                 session.addInput(input)
                 videoInput = input
+            } else {
+                lastError = "Esta cámara no es compatible con la sesión"
+                return
             }
         } catch {
             lastError = "No se pudo abrir la cámara: \(error.localizedDescription)"
             return
         }
+
+        applyBestPreset(preferred: resolution.sessionPreset)
 
         if includeAudio, let audioDevice = AVCaptureDevice.default(for: .audio) {
             if let aInput = try? AVCaptureDeviceInput(device: audioDevice),
@@ -238,6 +245,16 @@ final class CameraManager: NSObject, ObservableObject {
                 session.addInput(aInput)
                 audioInput = aInput
             }
+        }
+    }
+
+    private func applyBestPreset(preferred: AVCaptureSession.Preset) {
+        let candidates: [AVCaptureSession.Preset] = [
+            preferred, .hd1920x1080, .hd1280x720, .high, .medium, .low
+        ]
+        for preset in candidates where session.canSetSessionPreset(preset) {
+            session.sessionPreset = preset
+            return
         }
     }
 
